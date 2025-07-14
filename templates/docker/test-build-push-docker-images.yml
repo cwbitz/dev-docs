@@ -1,4 +1,8 @@
-name: Build & Push Docker Images
+name: Test, Build & Push Docker Images
+
+# This workflow builds and pushes Docker images for multiple tags and platforms.
+# IMPORTANT: For repositories with many tags, MAX_TAGS_TO_PROCESS is set internally to limit 
+# the number of tags processed to avoid API rate limits and workflow timeouts.
 
 on:
   workflow_call:
@@ -28,6 +32,7 @@ env:
   ORIGIN_REPO_FULL: ${{ github.repository }}
   ORIGIN_SERVER_URL: ${{ github.server_url }}
   GHCR_API_PREFIX: ${{ github.event.repository.owner.type == 'Organization' && format('orgs/{0}', github.repository_owner) || format('users/{0}', github.repository_owner) }}
+  MAX_TAGS_TO_PROCESS: 15
 
 jobs:
   pre-build:
@@ -42,10 +47,10 @@ jobs:
       upstream_contributors: ${{ steps.collect-upstream-metadata.outputs.UPSTREAM_CONTRIBUTORS }}
       ghcr_repo_exists: ${{ steps.check-registry.outputs.GHCR_REPO_EXISTS }}
       dh_repo_exists: ${{ steps.check-registry.outputs.DH_REPO_EXISTS }}
-      ghcr_versions_json: ${{ steps.analyze-tags.outputs.GHCR_VERSIONS_JSON }}
-      dh_versions_json: ${{ steps.analyze-tags.outputs.DH_VERSIONS_JSON }}
-      versions_to_test: ${{ steps.analyze-tags.outputs.VERSIONS_TO_TEST }}
-      versions_to_delete: ${{ steps.analyze-tags.outputs.VERSIONS_TO_DELETE }}
+      ghcr_tags_json: ${{ steps.analyze-tags.outputs.GHCR_TAGS_JSON }}
+      dh_tags_json: ${{ steps.analyze-tags.outputs.DH_TAGS_JSON }}
+      tags_to_test: ${{ steps.analyze-tags.outputs.TAGS_TO_TEST }}
+      tags_to_delete: ${{ steps.analyze-tags.outputs.TAGS_TO_DELETE }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -491,8 +496,8 @@ jobs:
           done
           echo "Detected ${#tags_with_dockerfile[@]} tags containing Dockerfile in origin Github repository"
 
-          delete_versions=()
-          test_versions=()
+          delete_tags=()
+          test_tags=()
 
           case "${{ inputs.registry }}" in
             "ghcr")
@@ -500,12 +505,12 @@ jobs:
               case "${{ steps.check-registry.outputs.GHCR_REPO_EXISTS }}" in
                 "false")
                   echo "GHCR repository does NOT exist. Skipping tag analysis."
-                  echo "GHCR_VERSIONS_JSON=[]" >> "$GITHUB_OUTPUT"
-                  versions_to_delete=[]
+                  echo "GHCR_TAGS_JSON=[]" >> "$GITHUB_OUTPUT"
+                  tags_to_delete=[]
                   if [[ ${#tags_with_dockerfile[@]} -eq 0 ]]; then
-                    versions_to_test=[]
+                    tags_to_test=[]
                   else
-                    versions_to_test=$(printf '%s\n' "${tags_with_dockerfile[@]}" | jq -R . | jq -sc .)
+                    tags_to_test=$(printf '%s\n' "${tags_with_dockerfile[@]}" | jq -R . | jq -sc .)
                   fi
                   ;;
                 "true")
@@ -519,7 +524,7 @@ jobs:
                     if [[ $gh_exit -eq 0 ]]; then
                       echo "GHCR repository exists. Parsing tags..."
                       mapfile -t ghcr_tags < <(echo "$response" | jq -r '.[] | .metadata.container.tags[]' | grep -E '^(v)?[0-9]+\.[0-9]+\.[0-9]+$')
-                      echo "GHCR_VERSIONS_JSON=$(echo "$response" | jq -sc .)" >> "$GITHUB_OUTPUT"
+                      echo "GHCR_TAGS_JSON=$(echo "$response" | jq -sc .)" >> "$GITHUB_OUTPUT"
                       echo "Detected ${#ghcr_tags[@]} semantic version tags in GHCR"
                       break
                     else
@@ -561,14 +566,14 @@ jobs:
                   else
                     for tag in "${ghcr_tags[@]}"; do
                       if [[ ${#tags_with_dockerfile[@]} -eq 0 ]] || ! printf '%s\n' "${tags_with_dockerfile[@]}" | grep -Fxq "$tag"; then
-                        delete_versions+=("$tag")
+                        delete_tags+=("$tag")
                       fi
                     done
                   fi
-                  if [[ ${#delete_versions[@]} -eq 0 ]]; then
-                    versions_to_delete=[]
+                  if [[ ${#delete_tags[@]} -eq 0 ]]; then
+                    tags_to_delete=[]
                   else
-                    versions_to_delete=$(printf '%s\n' "${delete_versions[@]}" | jq -R . | jq -sc .)
+                    tags_to_delete=$(printf '%s\n' "${delete_tags[@]}" | jq -R . | jq -sc .)
                   fi
 
                   # Compare local tags with GHCR tags to find what to test/build
@@ -577,14 +582,14 @@ jobs:
                   else
                     for tag in "${tags_with_dockerfile[@]}"; do
                       if [[ ${#ghcr_tags[@]} -eq 0 ]] || ! printf '%s\n' "${ghcr_tags[@]}" | grep -Fxq "$tag"; then
-                        test_versions+=("$tag")
+                        test_tags+=("$tag")
                       fi
                     done
                   fi
-                  if [[ ${#test_versions[@]} -eq 0 ]]; then
-                    versions_to_test=[]
+                  if [[ ${#test_tags[@]} -eq 0 ]]; then
+                    tags_to_test=[]
                   else
-                    versions_to_test=$(printf '%s\n' "${test_versions[@]}" | jq -R . | jq -sc .)
+                    tags_to_test=$(printf '%s\n' "${test_tags[@]}" | jq -R . | jq -sc .)
                   fi
                   ;;
                 *)
@@ -599,17 +604,17 @@ jobs:
               case "${{ steps.check-registry.outputs.DH_REPO_EXISTS }}" in
                 "false")
                   echo "Docker Hub repository does NOT exist. Skipping tag analysis."
-                  echo "DH_VERSIONS_JSON=[]" >> "$GITHUB_OUTPUT"
-                  versions_to_delete=[]
+                  echo "DH_TAGS_JSON=[]" >> "$GITHUB_OUTPUT"
+                  tags_to_delete=[]
                   if [[ ${#tags_with_dockerfile[@]} -eq 0 ]]; then
-                    versions_to_test=[]
+                    tags_to_test=[]
                   else
-                    versions_to_test=$(printf '%s\n' "${tags_with_dockerfile[@]}" | jq -R . | jq -sc .)
+                    tags_to_test=$(printf '%s\n' "${tags_with_dockerfile[@]}" | jq -R . | jq -sc .)
                   fi
                   ;;
                 "true")
                   next_url="https://hub.docker.com/v2/repositories/$DH_OWNER/$ORIGIN_REPO_NAME/tags?page_size=100"
-                  dh_versions=""
+                  dh_results=""
                   dh_tags=()
                   max_retries=5
                   retry_count=0
@@ -624,7 +629,7 @@ jobs:
                       case "$http_code" in
                         200)
                           echo "Repo exists, parsing tags..."
-                          dh_versions+=$(echo "$dh_body" | jq -c '.results[]')$'\n'
+                          dh_results+=$(echo "$dh_body" | jq -c '.results[]')$'\n'
                           mapfile -t batch_tags < <(echo "$dh_body" | jq -r '.results[].name // ""' | grep -E '^(v)?[0-9]+\.[0-9]+\.[0-9]+$')
                           dh_tags+=("${batch_tags[@]}")
                           next_url=$(echo "$dh_body" | jq -r '.next // ""')
@@ -664,10 +669,10 @@ jobs:
                     fi
                   done
 
-                  if [[ -n "$dh_versions" ]]; then
-                    echo "DH_VERSIONS_JSON=$(echo "$dh_versions" | jq -sc .)" >> "$GITHUB_OUTPUT"
+                  if [[ -n "$dh_results" ]]; then
+                    echo "DH_TAGS_JSON=$(echo "$dh_results" | jq -sc .)" >> "$GITHUB_OUTPUT"
                   else
-                    echo "DH_VERSIONS_JSON=[]" >> "$GITHUB_OUTPUT"
+                    echo "DH_TAGS_JSON=[]" >> "$GITHUB_OUTPUT"
                   fi
                   echo "Detected ${#dh_tags[@]} semantic version tags in Docker Hub"
 
@@ -677,14 +682,14 @@ jobs:
                   else
                     for tag in "${dh_tags[@]}"; do
                       if [[ ${#tags_with_dockerfile[@]} -eq 0 ]] || ! printf '%s\n' "${tags_with_dockerfile[@]}" | grep -Fxq "$tag"; then
-                        delete_versions+=("$tag")
+                        delete_tags+=("$tag")
                       fi
                     done
                   fi
-                  if [[ ${#delete_versions[@]} -eq 0 ]]; then
-                    versions_to_delete=[]
+                  if [[ ${#delete_tags[@]} -eq 0 ]]; then
+                    tags_to_delete=[]
                   else
-                    versions_to_delete=$(printf '%s\n' "${delete_versions[@]}" | jq -R . | jq -sc .)
+                    tags_to_delete=$(printf '%s\n' "${delete_tags[@]}" | jq -R . | jq -sc .)
                   fi
 
                   # Compare local tags with Docker Hub tags to find what to test/build
@@ -693,14 +698,14 @@ jobs:
                   else
                     for tag in "${tags_with_dockerfile[@]}"; do
                       if [[ ${#dh_tags[@]} -eq 0 ]] || ! printf '%s\n' "${dh_tags[@]}" | grep -Fxq "$tag"; then
-                        test_versions+=("$tag")
+                        test_tags+=("$tag")
                       fi
                     done
                   fi
-                  if [[ ${#test_versions[@]} -eq 0 ]]; then
-                    versions_to_test=[]
+                  if [[ ${#test_tags[@]} -eq 0 ]]; then
+                    tags_to_test=[]
                   else
-                    versions_to_test=$(printf '%s\n' "${test_versions[@]}" | jq -R . | jq -sc .)
+                    tags_to_test=$(printf '%s\n' "${test_tags[@]}" | jq -R . | jq -sc .)
                   fi
                   ;;
                 *)
@@ -715,8 +720,24 @@ jobs:
               ;;
           esac
 
-          echo "VERSIONS_TO_DELETE=$versions_to_delete" >> "$GITHUB_OUTPUT"
-          echo "VERSIONS_TO_TEST=$versions_to_test" >> "$GITHUB_OUTPUT"
+          # Apply tag limiting to tags_to_test to prevent API rate limits and long execution times
+          max_tags=$MAX_TAGS_TO_PROCESS
+          if [[ "$tags_to_test" != "[]" ]]; then
+            mapfile -t test_tags_array < <(echo "$tags_to_test" | jq -r '.[]')
+            if [[ ${#test_tags_array[@]} -gt $max_tags ]]; then
+              echo "WARNING: Detected ${#test_tags_array[@]} tags to test/build, but limiting to $max_tags most recent tags to prevent rate limits and timeouts"
+              echo "Original tags to test: ${test_tags_array[*]}"
+              
+              limited_test_tags=("${test_tags_array[@]: -$max_tags}")
+              tags_to_test=$(printf '%s\n' "${limited_test_tags[@]}" | jq -R . | jq -sc .)
+              echo "Limited to ${#limited_test_tags[@]} tags to test: ${limited_test_tags[*]}"
+            else
+              echo "Testing all ${#test_tags_array[@]} tags (within limit of $max_tags)"
+            fi
+          fi
+
+          echo "TAGS_TO_DELETE=$tags_to_delete" >> "$GITHUB_OUTPUT"
+          echo "TAGS_TO_TEST=$tags_to_test" >> "$GITHUB_OUTPUT"
         shell: bash
 
   test-images:
@@ -741,18 +762,18 @@ jobs:
         id: test
         env:
           BUILDX_PLATFORMS: ${{ needs.pre-build.outputs.buildx_platforms }}
-          VERSIONS_TO_TEST: ${{ needs.pre-build.outputs.versions_to_test }}
+          TAGS_TO_TEST: ${{ needs.pre-build.outputs.tags_to_test }}
         run: |
           set -euo pipefail
 
-          if [[ "$VERSIONS_TO_TEST" == "[]" ]]; then
+          if [[ "$TAGS_TO_TEST" == "[]" ]]; then
             echo "No tags to test"
             echo "PASSED_TAGS_PLATFORMS_JSON={}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           original_state=$(git rev-parse --abbrev-ref HEAD)
-          mapfile -t tags < <(echo "$VERSIONS_TO_TEST" | jq -r '.[]')
+          mapfile -t tags < <(echo "$TAGS_TO_TEST" | jq -r '.[]')
 
           declare -A passed_tag_platforms
           declare -a passed_tags
@@ -838,17 +859,17 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Remove Deprecated Images From GHCR
-        if: ${{ needs.pre-build.outputs.GHCR_REPO_EXISTS == 'true' && needs.pre-build.outputs.versions_to_delete != '[]' }}
+        if: ${{ needs.pre-build.outputs.GHCR_REPO_EXISTS == 'true' && needs.pre-build.outputs.tags_to_delete != '[]' }}
         env:
-          VERSIONS_TO_DELETE: ${{ needs.pre-build.outputs.versions_to_delete }}
-          GHCR_VERSIONS_JSON: ${{ needs.pre-build.outputs.ghcr_versions_json }}
+          TAGS_TO_DELETE: ${{ needs.pre-build.outputs.tags_to_delete }}
+          GHCR_TAGS_JSON: ${{ needs.pre-build.outputs.ghcr_tags_json }}
         run: |
           set -euo pipefail
 
           echo "Removing deprecated images from GHCR..."
-          for tag in $(echo "$VERSIONS_TO_DELETE" | jq -r '.[]'); do
+          for tag in $(echo "$TAGS_TO_DELETE" | jq -r '.[]'); do
             # version_id may be a multi-line string if multiple versions share the same tag
-            mapfile -t version_ids < <(echo "$GHCR_VERSIONS_JSON" | jq -r --arg tag "$tag" '.[] | select(.metadata.container.tags[] == $tag) | .id')
+            mapfile -t version_ids < <(echo "$GHCR_TAGS_JSON" | jq -r --arg tag "$tag" '.[] | select(.metadata.container.tags[] == $tag) | .id')
             if [[ ${#version_ids[@]} -eq 0 ]]; then
               echo "Could not find version ID for tag: $tag"
               exit 1
@@ -900,7 +921,7 @@ jobs:
           done
           echo "Cleanup completed"
 
-          new_ghcr_versions=$(jq --argjson del "$VERSIONS_TO_DELETE" '
+          new_ghcr_tags=$(jq --argjson del "$TAGS_TO_DELETE" '
             [ .[]
               | select(type == "object")
               | .metadata.container.tags[]?
@@ -909,13 +930,13 @@ jobs:
                   and (IN(. ; $del[]) | not)
                 )
             ]
-          ' <<< "$GHCR_VERSIONS_JSON")
+          ' <<< "$GHCR_TAGS_JSON")
 
-          if [[ "$new_ghcr_versions" == "[]" ]]; then
+          if [[ "$new_ghcr_tags" == "[]" ]]; then
             echo "No tags remain after deletion."
             new_latest_tag=""
           else
-            new_latest_tag=$(echo "$new_ghcr_versions" | jq -r '.[]' | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+            new_latest_tag=$(echo "$new_ghcr_tags" | jq -r '.[]' | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
           fi
 
           if [[ -n "$new_latest_tag" ]]; then
@@ -1052,10 +1073,10 @@ jobs:
           password: ${{ secrets.DH_PAT }}
 
       - name: Remove Deprecated Images From Docker Hub
-        if: ${{ needs.pre-build.outputs.DH_REPO_EXISTS == 'true' && needs.pre-build.outputs.versions_to_delete != '[]' }}
+        if: ${{ needs.pre-build.outputs.DH_REPO_EXISTS == 'true' && needs.pre-build.outputs.tags_to_delete != '[]' }}
         env:
-          VERSIONS_TO_DELETE: ${{ needs.pre-build.outputs.versions_to_delete }}
-          DH_VERSIONS_JSON: ${{ needs.pre-build.outputs.dh_versions_json }}
+          TAGS_TO_DELETE: ${{ needs.pre-build.outputs.tags_to_delete }}
+          DH_TAGS_JSON: ${{ needs.pre-build.outputs.dh_tags_json }}
         run: |
           set -euo pipefail
 
@@ -1064,8 +1085,8 @@ jobs:
           declare -A tag_to_digest
           declare -A digest_to_tags
 
-          mapfile -t all_tags < <(echo "$DH_VERSIONS_JSON" | jq -r '.[] | .name')
-          mapfile -t all_digests < <(echo "$DH_VERSIONS_JSON" | jq -r '.[] | .digest')
+          mapfile -t all_tags < <(echo "$DH_TAGS_JSON" | jq -r '.[] | .name')
+          mapfile -t all_digests < <(echo "$DH_TAGS_JSON" | jq -r '.[] | .digest')
 
           for i in "${!all_tags[@]}"; do
             tag="${all_tags[$i]}"
@@ -1077,8 +1098,8 @@ jobs:
           done
 
           latest_deleted=false
-          for version in $(echo "$VERSIONS_TO_DELETE" | jq -r '.[]'); do
-            digest="${tag_to_digest[$version]}"
+          for tag in $(echo "$TAGS_TO_DELETE" | jq -r '.[]'); do
+            digest="${tag_to_digest[$tag]}"
             tags="${digest_to_tags[$digest]}"
             if echo "$tags" | grep -wq "latest"; then
               latest_deleted=true
@@ -1152,9 +1173,9 @@ jobs:
           echo "Cleanup completed"
 
           if [[ "$latest_deleted" == "true" ]]; then
-            echo "Re-tagging the new latest version as 'latest'..."
+            echo "Re-tagging the new latest tag as 'latest'..."
             mapfile -t remaining_semver_tags < <(
-              echo "$DH_VERSIONS_JSON" | jq -r '.[] | .name' | \
+              echo "$DH_TAGS_JSON" | jq -r '.[] | .name' | \
                 grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | \
                 grep -vxFf <(printf '%s\n' "${tags_deleted[@]}")
             )
@@ -1166,7 +1187,7 @@ jobs:
 
             new_latest_tag=$(printf "%s\n" "${remaining_semver_tags[@]}" | sort -V | tail -n1)
             echo "New latest tag: $new_latest_tag"
-            new_latest_digest=$(echo "$DH_VERSIONS_JSON" | jq -r --arg tag "$new_latest_tag" '.[] | select(.name == $tag) | .digest')
+            new_latest_digest=$(echo "$DH_TAGS_JSON" | jq -r --arg tag "$new_latest_tag" '.[] | select(.name == $tag) | .digest')
 
             if [[ -z "$new_latest_digest" ]]; then
               echo "Could not find digest for new latest tag: $new_latest_tag"
